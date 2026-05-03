@@ -1,0 +1,15 @@
+﻿Debug/
+Release/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.d
+.metadata/
+.settings/
+.vscode/
+__pycache__/
+*.pyc
+*.launch
