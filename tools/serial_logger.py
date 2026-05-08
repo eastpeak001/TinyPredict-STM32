@@ -1,27 +1,34 @@
 ﻿#!/usr/bin/env python3
 """Serial CSV logger for TinyPredict-STM32.
 
-Expected STM32 line format:
-ax=0.098, ay=-0.860, az=0.504, vx=-0.001, vy=-0.218, vz=-0.108, rms=0.349, status=ALARM
+Preferred STM32 firmware output:
+    time_ms,ax,ay,az,rms,status
+    1234,0.012,-0.034,1.002,0.056,NORMAL
+
+Legacy key-value lines are also parsed when possible:
+    t=1234 ax=0.012 ay=-0.034 az=1.002 rms=0.056 status=NORMAL
 """
 
 import argparse
 import csv
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-CSV_FIELDS = ["timestamp", "label", "ax", "ay", "az", "vx", "vy", "vz", "rms", "status"]
-NUMERIC_FIELDS = ["ax", "ay", "az", "vx", "vy", "vz", "rms"]
-LINE_PATTERN = re.compile(r"\b(ax|ay|az|vx|vy|vz|rms|status)\s*=\s*([^,\s]+)")
-LABEL_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_DIR = PROJECT_ROOT / "docs" / "data"
+CSV_FIELDS = ["time_ms", "ax", "ay", "az", "rms", "status"]
+NUMERIC_FIELDS = ["time_ms", "ax", "ay", "az", "rms"]
+FIRMWARE_HEADER = ",".join(CSV_FIELDS)
+KEY_VALUE_PATTERN = re.compile(r"\b(time_ms|t|ax|ay|az|rms|status)\s*=\s*([^,\s]+)")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Log TinyPredict-STM32 USART output to CSV on Windows."
+        description="Log TinyPredict-STM32 USART CSV output to a CSV file."
     )
     parser.add_argument(
         "--port",
@@ -35,14 +42,16 @@ def parse_args() -> argparse.Namespace:
         help="Serial baud rate. Default: 115200.",
     )
     parser.add_argument(
+        "--out",
         "--output",
+        dest="out",
         default=None,
-        help="CSV output path. Default: tinypredict_LABEL_YYYYMMDD_HHMMSS.csv.",
+        help="CSV output path. Default: docs/data/log_YYYYMMDD_HHMMSS.csv.",
     )
     parser.add_argument(
         "--label",
-        default="unlabeled",
-        help="Test segment label, for example idle, normal, slight_unbalance, severe_unbalance.",
+        default=None,
+        help="Legacy option kept for old scripts. Labels are not written to the current CSV format.",
     )
     parser.add_argument(
         "--list-ports",
@@ -52,15 +61,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def sanitize_label(label: str) -> str:
-    clean_label = LABEL_PATTERN.sub("_", label.strip())
-    clean_label = clean_label.strip("_")
-    return clean_label if clean_label else "unlabeled"
-
-
-def make_default_output_path(label: str) -> Path:
+def make_default_output_path() -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path(f"tinypredict_{sanitize_label(label)}_{timestamp}.csv")
+    return DEFAULT_DATA_DIR / f"log_{timestamp}.csv"
 
 
 def import_serial_module():
@@ -134,7 +137,7 @@ def resolve_serial_port(requested_port: Optional[str]) -> Optional[str]:
                 description = port.description or "Unknown device"
                 print(f"{port.device} - {description}", file=sys.stderr)
         else:
-            print("No serial ports found.", file=sys.stderr)
+            print_no_serial_ports_help()
         return None
 
     print_available_ports(ports)
@@ -146,37 +149,90 @@ def resolve_serial_port(requested_port: Optional[str]) -> Optional[str]:
 
     if len(ports) > 1:
         print("Please specify the target port, for example:")
-        print(f"  py tools/serial_logger.py --port {ports[0].device} --baud 115200")
+        print(f"  python tools/serial_logger.py --port {ports[0].device} --baud 115200")
     else:
         print("Please connect the USB-to-TTL adapter and try again.")
 
     return None
 
 
-def parse_serial_line(line: str, label: str) -> Optional[Dict[str, object]]:
-    values = {key: value for key, value in LINE_PATTERN.findall(line)}
+def is_firmware_header(line: str) -> bool:
+    normalized = line.strip().replace(" ", "").lower()
+    return normalized == FIRMWARE_HEADER
 
+
+def normalize_row(row: Dict[str, object]) -> Optional[Dict[str, object]]:
+    normalized: Dict[str, object] = {}
+
+    for field in CSV_FIELDS:
+        value = row.get(field)
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+        normalized[field] = value
+
+    for field in NUMERIC_FIELDS:
+        try:
+            number = float(normalized[field])
+        except (TypeError, ValueError):
+            return None
+
+        if field == "time_ms":
+            normalized[field] = str(int(number))
+        else:
+            normalized[field] = f"{number:.3f}"
+
+    normalized["status"] = str(normalized["status"]).strip()
+    if not normalized["status"]:
+        return None
+
+    return normalized
+
+
+def parse_csv_data_line(line: str) -> Optional[Dict[str, object]]:
+    try:
+        values = next(csv.reader([line]))
+    except csv.Error:
+        return None
+
+    if len(values) != len(CSV_FIELDS):
+        return None
+
+    row = dict(zip(CSV_FIELDS, values))
+    return normalize_row(row)
+
+
+def parse_legacy_key_value_line(line: str, fallback_time_ms: int) -> Optional[Dict[str, object]]:
+    values = {key: value for key, value in KEY_VALUE_PATTERN.findall(line)}
     required_fields = ["ax", "ay", "az", "rms", "status"]
     if not all(field in values for field in required_fields):
         return None
 
+    time_value = values.get("time_ms", values.get("t", str(fallback_time_ms)))
     row: Dict[str, object] = {
-        "timestamp": datetime.now().isoformat(timespec="milliseconds"),
-        "label": label,
-        "status": values["status"].strip(),
+        "time_ms": time_value,
+        "ax": values["ax"],
+        "ay": values["ay"],
+        "az": values["az"],
+        "rms": values["rms"],
+        "status": values["status"],
     }
+    return normalize_row(row)
 
-    for field in NUMERIC_FIELDS:
-        if field not in values:
-            row[field] = ""
-            continue
 
-        try:
-            row[field] = float(values[field])
-        except ValueError:
-            return None
+def parse_serial_line(line: str, fallback_time_ms: int) -> Optional[Dict[str, object]]:
+    if not line:
+        return None
 
-    return row
+    if is_firmware_header(line):
+        return None
+
+    csv_row = parse_csv_data_line(line)
+    if csv_row is not None:
+        return csv_row
+
+    return parse_legacy_key_value_line(line, fallback_time_ms)
 
 
 def open_serial(port: str, baud: int):
@@ -184,9 +240,15 @@ def open_serial(port: str, baud: int):
     return serial.Serial(port=port, baudrate=baud, timeout=1.0)
 
 
+def print_startup_info(port: str, baud: int, output_path: Path) -> None:
+    print(f"Serial port: {port}")
+    print(f"Baud rate: {baud}")
+    print(f"Output CSV: {output_path}")
+    print(f"Expected CSV fields: {FIRMWARE_HEADER}")
+
+
 def main() -> int:
     args = parse_args()
-    label = sanitize_label(args.label)
 
     try:
         if args.list_ports:
@@ -201,18 +263,19 @@ def main() -> int:
     if selected_port is None:
         return 1
 
-    output_path = Path(args.output) if args.output else make_default_output_path(label)
-
-    print(f"Opening serial port {selected_port} at {args.baud} baud...")
-    print(f"Test label: {label}")
-    print(f"Saving CSV to: {output_path}")
+    output_path = Path(args.out) if args.out else make_default_output_path()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    print_startup_info(selected_port, args.baud, output_path)
 
     serial_port = None
     try:
         serial_port = open_serial(selected_port, args.baud)
     except Exception as exc:
-        print(f"Failed to open serial port: {exc}", file=sys.stderr)
+        print(f"Failed to open serial port {selected_port}: {exc}", file=sys.stderr)
+        print("Please check that the COM port exists and is not used by another program.", file=sys.stderr)
         return 1
+
+    start_monotonic = time.monotonic()
 
     try:
         with output_path.open("a", newline="", encoding="utf-8") as csv_file:
@@ -227,25 +290,21 @@ def main() -> int:
                     raw_line = serial_port.readline()
                 except Exception as exc:
                     print(f"Serial read failed: {exc}", file=sys.stderr)
-                    continue
+                    return 1
 
                 if not raw_line:
                     continue
 
-                try:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                except Exception as exc:
-                    print(f"Decode failed: {exc}", file=sys.stderr)
-                    continue
-
-                row = parse_serial_line(line, label)
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                fallback_time_ms = int((time.monotonic() - start_monotonic) * 1000)
+                row = parse_serial_line(line, fallback_time_ms)
                 if row is None:
-                    print(f"Parse skipped: {line}", file=sys.stderr)
+                    print(f"[info] {line}")
                     continue
 
                 writer.writerow(row)
                 csv_file.flush()
-                print(f"label={row['label']}, rms={row['rms']:.3f}, status={row['status']}")
+                print(f"time_ms={row['time_ms']}, rms={row['rms']}, status={row['status']}")
 
     except KeyboardInterrupt:
         print("\nStopping logger...")
@@ -259,6 +318,7 @@ def main() -> int:
                 print("Serial port closed.")
             except Exception as exc:
                 print(f"Failed to close serial port: {exc}", file=sys.stderr)
+        print(f"CSV saved to: {output_path}")
 
     return 0
 

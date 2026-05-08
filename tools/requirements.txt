@@ -1,2 +1,4 @@
-pyserial
+﻿pyserial
+pandas
 matplotlib
+
