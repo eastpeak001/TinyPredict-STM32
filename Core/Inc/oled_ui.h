@@ -1,4 +1,4 @@
-#ifndef OLED_UI_H
+﻿#ifndef OLED_UI_H
 #define OLED_UI_H
 
 #include <stdint.h>
@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 uint8_t OledUI_Init(void);
+void OledUI_ShowLogoBoot(void);
 void OledUI_Update(float rms_value, const char *status_text);
 uint8_t OledUI_IsReady(void);
 
@@ -16,3 +17,4 @@ uint8_t OledUI_IsReady(void);
 #endif
 
 #endif /* OLED_UI_H */
+

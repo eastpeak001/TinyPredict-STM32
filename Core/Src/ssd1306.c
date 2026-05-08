@@ -1,4 +1,4 @@
-#include "ssd1306.h"
+﻿#include "ssd1306.h"
 #include <string.h>
 
 #define SSD1306_I2C_ADDR        (0x3CU << 1)
@@ -269,8 +269,36 @@ void SSD1306_DrawString(uint8_t x, uint8_t y, const char *text)
   }
 }
 
+void SSD1306_DrawBitmap(uint8_t x, uint8_t y, const uint8_t *bitmap, uint8_t width, uint8_t height)
+{
+  uint8_t row;
+  uint8_t column;
+  uint8_t row_bytes;
+
+  if ((bitmap == 0) || (width == 0U) || (height == 0U))
+  {
+    return;
+  }
+
+  row_bytes = (uint8_t)((width + 7U) / 8U);
+
+  for (row = 0U; row < height; row++)
+  {
+    for (column = 0U; column < width; column++)
+    {
+      uint16_t byte_index = ((uint16_t)row * row_bytes) + (column / 8U);
+      uint8_t bit_mask = (uint8_t)(0x80U >> (column % 8U));
+
+      if ((bitmap[byte_index] & bit_mask) != 0U)
+      {
+        SSD1306_DrawPixel((uint8_t)(x + column), (uint8_t)(y + row), 1U);
+      }
+    }
+  }
+}
 uint8_t SSD1306_IsReady(void)
 {
   return s_ready;
 }
+
 
